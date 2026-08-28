@@ -1,0 +1,45 @@
+[market]
+indian_equities_only = true
+timezone = "Asia/Kolkata"
+market_open = "09:15"
+new_entries_start = "09:15"
+last_new_entry_time = "15:10"
+force_exit_start = "15:20"
+force_exit_deadline = "15:25"
+normal_market_close = "15:30"
+
+[capital]
+initial_capital_inr = "100"
+maximum_stock_allocation = "0.10"
+maximum_portfolio_allocation = "1.00"
+leverage_allowed = false
+fractional_shares_allowed = false
+intraday_capital_topups_allowed = false
+
+[risk]
+daily_loss_limit_fraction = "0.20"
+max_consecutive_losses = 3
+maximum_positions = 10
+emergency_stop_enabled = true
+
+[testing]
+paper_trading_enabled = true
+live_trading_enabled = false
+trading_mode = "FULLY_AUTOMATED_PAPER"
+
+[safety]
+withdrawals_allowed = false
+bank_account_access_allowed = false
+external_transfers_allowed = false
+fail_closed = true
+
+[settlement]
+profit_sharing_enabled = true
+profit_sharing_threshold = "0.10"
+user_profit_fraction_above_threshold = "0.50"
+paper_settlement_lag_days = 1
+
+[learning]
+strategy_discovery = true
+strategy_optimization = true
+automatic_strategy_deployment = false
