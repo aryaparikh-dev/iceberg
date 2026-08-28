@@ -16,3 +16,5 @@ Explicitly denied by default:
 - `FUNDING_CONFIRM`
 
 Strategies and AI cannot modify their own permissions.
+
+Funding confirmation, emergency-stop deactivation, and risk-counter resets require authenticated authorization contexts with the relevant capability. AI contexts lack `FUNDING_CONFIRM`, `CAPITAL_ADMIN`, `BANK_ACCESS`, `WITHDRAW_FUNDS`, and `EXTERNAL_TRANSFER`.

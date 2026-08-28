@@ -1,5 +1,6 @@
 from iceberg.capital.funding import FundingLedger
 from iceberg.capital.manager import CapitalManager
+from iceberg.security.auth import external_reconciler_context
 
 from tests.conftest import D, TRADING_DATE, ist_datetime
 
@@ -12,7 +13,7 @@ def test_intraday_topup_forbidden_in_v1_even_after_confirmation(safe_context):
     event = ledger.create_pending(D("999"), created_by="USER", requested_at=ist_datetime(11, 0))
     ledger.confirm(
         event.funding_id,
-        confirmed_by="EXTERNAL_RECONCILER",
+        context=external_reconciler_context(),
         external_reference="bank-ref-3",
         confirmed_at=ist_datetime(11, 5),
         effective_trading_date=TRADING_DATE,

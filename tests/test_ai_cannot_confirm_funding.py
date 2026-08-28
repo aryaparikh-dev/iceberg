@@ -2,6 +2,7 @@ import pytest
 
 from iceberg.capital.funding import FundingLedger
 from iceberg.exceptions import PermissionDeniedError
+from iceberg.security.auth import ai_context
 
 from tests.conftest import D, TRADING_DATE, ist_datetime
 
@@ -13,7 +14,7 @@ def test_ai_cannot_mark_funding_confirmed():
     with pytest.raises(PermissionDeniedError):
         ledger.confirm(
             event.funding_id,
-            confirmed_by="AI",
+            context=ai_context(),
             external_reference="not-allowed",
             confirmed_at=ist_datetime(8, 1),
             effective_trading_date=TRADING_DATE,

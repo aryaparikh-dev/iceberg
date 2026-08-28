@@ -18,9 +18,9 @@ def test_duplicate_decision_or_idempotency_key_does_not_create_two_positions(saf
         now=safe_context.now,
     )
 
-    first = broker.submit_order(proposal, decision, idempotency_key="same-key", now=safe_context.now)
-    second = broker.submit_order(proposal, decision, idempotency_key="same-key", now=safe_context.now)
-    third = broker.submit_order(proposal, decision, idempotency_key="different-key", now=safe_context.now)
+    first = broker.submit_order(proposal, decision.authorization, idempotency_key="same-key", now=safe_context.now)
+    second = broker.submit_order(proposal, decision.authorization, idempotency_key="same-key", now=safe_context.now)
+    third = broker.submit_order(proposal, decision.authorization, idempotency_key="different-key", now=safe_context.now)
 
     assert first.order_id == second.order_id
     assert third.status == "REJECTED"

@@ -32,3 +32,11 @@ class ReconciliationError(FailClosedError):
 
 class DuplicateDecisionError(FailClosedError):
     """Raised when a decision or idempotency key has already been consumed."""
+
+
+class AuthorizationError(FailClosedError):
+    """Raised when execution authorization is missing, invalid, or reused."""
+
+
+class ConfigurationError(FailClosedError):
+    """Raised when unsafe or inconsistent configuration is detected."""

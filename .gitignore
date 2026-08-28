@@ -11,6 +11,9 @@ broker_tokens/
 broker-tokens/
 logs/
 *.log
+*.db
+*.sqlite
+*.sqlite3
 __pycache__/
 *.py[cod]
 .pytest_cache/

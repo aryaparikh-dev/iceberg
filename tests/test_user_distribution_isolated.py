@@ -4,7 +4,10 @@ from tests.conftest import D, ist_datetime
 
 
 def test_user_distribution_never_returns_to_ai_capital(safe_context):
-    safe_context.guard.settle_trading_day(D("500"), positions_flat=True)
+    safe_context.guard.state.available_cash = D("500")
+    safe_context.guard.state.settled_cash = D("500")
+    safe_context.guard.state.broker_available_cash = D("500")
+    safe_context.guard.settle_trading_day(safe_context.portfolio)
     assert safe_context.guard.state.user_distribution == D("200")
 
     manager = CapitalManager(safe_context.guard, None, safe_context.settings, safe_context.calendar)

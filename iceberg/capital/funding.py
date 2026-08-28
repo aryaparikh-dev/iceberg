@@ -5,12 +5,10 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import uuid4
 
-from iceberg.domain.enums import FundingStatus
+from iceberg.domain.enums import FundingStatus, Permission
 from iceberg.domain.models import money, require_aware
 from iceberg.exceptions import FundingError, PermissionDeniedError
-
-
-AUTHORIZED_CONFIRMERS = {"USER", "EXTERNAL_RECONCILER", "ADMIN"}
+from iceberg.security.auth import AuthorizationContext
 
 
 @dataclass
@@ -39,8 +37,11 @@ class FundingEvent:
 class FundingLedger:
     """Append-only-ish funding ledger for externally confirmed user capital."""
 
-    def __init__(self) -> None:
+    def __init__(self, store=None) -> None:
+        self.store = store
         self._events: dict[str, FundingEvent] = {}
+        if store is not None:
+            self._events = {event.funding_id: event for event in store.load_funding_events()}
 
     def create_pending(
         self,
@@ -60,20 +61,19 @@ class FundingLedger:
             notes=notes,
         )
         self._events[event.funding_id] = event
+        self._persist(event)
         return event
 
     def confirm(
         self,
         funding_id: str,
         *,
-        confirmed_by: str,
+        context: AuthorizationContext,
         external_reference: str,
         confirmed_at: datetime,
         effective_trading_date: date,
     ) -> FundingEvent:
-        actor = confirmed_by.upper()
-        if actor == "AI" or actor not in AUTHORIZED_CONFIRMERS:
-            raise PermissionDeniedError("AI or unauthorized actors cannot confirm funding")
+        context.require(Permission.FUNDING_CONFIRM)
         require_aware(confirmed_at, "confirmed_at")
         event = self._require_event(funding_id)
         if event.status is not FundingStatus.PENDING:
@@ -82,26 +82,27 @@ class FundingLedger:
         event.confirmed_at = confirmed_at
         event.external_reference = external_reference
         event.effective_trading_date = effective_trading_date
+        self._persist(event)
         return event
 
-    def reject(self, funding_id: str, *, actor: str, notes: str = "") -> FundingEvent:
-        if actor.upper() == "AI":
-            raise PermissionDeniedError("AI cannot reject funding")
+    def reject(self, funding_id: str, *, context: AuthorizationContext, notes: str = "") -> FundingEvent:
+        context.require(Permission.CAPITAL_ADMIN)
         event = self._require_event(funding_id)
         if event.status is not FundingStatus.PENDING:
             raise FundingError("only pending funding can be rejected")
         event.status = FundingStatus.REJECTED
         event.notes = notes or event.notes
+        self._persist(event)
         return event
 
-    def cancel(self, funding_id: str, *, actor: str, notes: str = "") -> FundingEvent:
-        if actor.upper() == "AI":
-            raise PermissionDeniedError("AI cannot cancel funding")
+    def cancel(self, funding_id: str, *, context: AuthorizationContext, notes: str = "") -> FundingEvent:
+        context.require(Permission.CAPITAL_ADMIN)
         event = self._require_event(funding_id)
         if event.status is not FundingStatus.PENDING:
             raise FundingError("only pending funding can be cancelled")
         event.status = FundingStatus.CANCELLED
         event.notes = notes or event.notes
+        self._persist(event)
         return event
 
     def mark_applied(self, funding_id: str) -> FundingEvent:
@@ -109,6 +110,7 @@ class FundingLedger:
         if event.status is not FundingStatus.CONFIRMED:
             raise FundingError("only confirmed funding can be applied")
         event.status = FundingStatus.APPLIED
+        self._persist(event)
         return event
 
     def confirmed_unapplied(self) -> list[FundingEvent]:
@@ -122,3 +124,7 @@ class FundingLedger:
             return self._events[funding_id]
         except KeyError as exc:
             raise FundingError(f"unknown funding event {funding_id}") from exc
+
+    def _persist(self, event: FundingEvent) -> None:
+        if self.store is not None:
+            self.store.save_funding_event(event)

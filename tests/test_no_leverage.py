@@ -29,7 +29,7 @@ def test_paper_broker_cannot_create_negative_cash_from_unapproved_order(safe_con
     proposal = TradeProposal.buy("ABC", price=D("10"), decision_id="rejected")
     decision = safe_context.risk.reject("INSUFFICIENT_CASH", proposal)
 
-    execution = broker.submit_order(proposal, decision, idempotency_key="reject-key", now=safe_context.now)
+    execution = broker.submit_order(proposal, decision.authorization, idempotency_key="reject-key", now=safe_context.now)
 
     assert execution.status == "REJECTED"
     assert safe_context.guard.state.available_cash == D("100")

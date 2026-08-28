@@ -21,7 +21,7 @@ def test_sale_proceeds_are_accounted_separately_from_settled_broker_cash(safe_co
         now=safe_context.now,
     )
 
-    broker.submit_order(sell, decision, idempotency_key="sell-key", now=safe_context.now)
+    broker.submit_order(sell, decision.authorization, idempotency_key="sell-key", now=safe_context.now)
 
     assert safe_context.guard.state.available_cash == D("100")
     assert safe_context.guard.state.unsettled_cash == D("10")

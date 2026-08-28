@@ -60,3 +60,14 @@ def test_data_validator_rejects_duplicates_and_non_monotonic_timestamps():
             now=ist_datetime(10, 2),
         )
     assert exc.value.reason == "NON_MONOTONIC_TIMESTAMPS"
+
+
+def test_data_validator_rejects_future_candles():
+    with pytest.raises(DataValidationError) as exc:
+        DataValidator(max_staleness=timedelta(minutes=5)).validate_candles(
+            [candle(timestamp=ist_datetime(10, 2))],
+            expected_symbol="ABC",
+            now=ist_datetime(10, 1),
+        )
+
+    assert exc.value.reason == "FUTURE_TIMESTAMP"

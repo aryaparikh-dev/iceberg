@@ -1,5 +1,6 @@
 from iceberg.capital.funding import FundingLedger
 from iceberg.capital.manager import CapitalManager
+from iceberg.security.auth import external_reconciler_context
 
 from tests.conftest import D, TRADING_DATE, ist_datetime
 
@@ -12,7 +13,7 @@ def test_confirmed_intraday_deposit_becomes_eligible_next_trading_day_by_default
     event = ledger.create_pending(D("50"), created_by="USER", requested_at=ist_datetime(10, 0))
     ledger.confirm(
         event.funding_id,
-        confirmed_by="EXTERNAL_RECONCILER",
+        context=external_reconciler_context(),
         external_reference="bank-ref-2",
         confirmed_at=ist_datetime(10, 1),
         effective_trading_date=TRADING_DATE,

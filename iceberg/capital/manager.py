@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from iceberg.capital.funding import FundingLedger
-from iceberg.capital.guard import CapitalGuard
+from iceberg.capital.guard import _CAPITAL_MANAGER_TOKEN, CapitalGuard
 from iceberg.config.settings import Settings
 from iceberg.domain.models import money
 from iceberg.exceptions import MarketClosedError, ReconciliationError
@@ -34,8 +34,13 @@ class CapitalManager:
         base = money(self.capital.state.next_day_capital)
         eligible = self._eligible_confirmed_events(trading_date, snapshot_time)
         amount = base + sum((event.amount for event in eligible), Decimal("0"))
-        self.capital.create_daily_snapshot(trading_date, snapshot_time, capital_amount=amount)
-        if self.funding_ledger is not None:
+        created = self.capital._create_daily_snapshot(
+            trading_date,
+            snapshot_time,
+            capital_amount=amount,
+            authority_token=_CAPITAL_MANAGER_TOKEN,
+        )
+        if created and self.funding_ledger is not None:
             for event in eligible:
                 self.funding_ledger.mark_applied(event.funding_id)
         return amount

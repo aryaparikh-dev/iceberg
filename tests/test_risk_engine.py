@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from iceberg.domain.enums import AssetClass
 from iceberg.domain.models import TradeProposal
 
 from tests.conftest import D, market_snapshot
@@ -78,3 +79,22 @@ def test_risk_engine_rejects_stale_market_data(safe_context):
 
     assert not decision.approved
     assert decision.rejection_reason == "STALE_MARKET_DATA"
+
+
+def test_risk_engine_rejects_unsupported_asset_class(safe_context):
+    proposal = TradeProposal.buy("ABC", price=D("10"), decision_id="unsupported", asset_class=AssetClass.INDIAN_EQUITY)
+    object.__setattr__(proposal, "asset_class", "OPTIONS")
+
+    decision = safe_context.risk.evaluate(
+        proposal,
+        portfolio=safe_context.portfolio,
+        capital=safe_context.guard,
+        market_data=market_snapshot("ABC", "10", safe_context.now),
+        permissions=safe_context.permissions,
+        emergency_stop=safe_context.emergency_stop,
+        market_clock=safe_context.clock,
+        now=safe_context.now,
+    )
+
+    assert not decision.approved
+    assert decision.rejection_reason == "UNSUPPORTED_ASSET_CLASS"

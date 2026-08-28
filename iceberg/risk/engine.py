@@ -5,8 +5,9 @@ from decimal import Decimal
 
 from iceberg.capital.guard import CapitalGuard
 from iceberg.config.settings import Settings, default_settings
-from iceberg.domain.enums import Permission, TradeSide, TradingMode
+from iceberg.domain.enums import AssetClass, Permission, TradeSide, TradingMode
 from iceberg.domain.models import MarketDataSnapshot, RiskDecision, TradeProposal, money, require_aware
+from iceberg.execution.authorization import _issue_execution_authorization
 from iceberg.exceptions import FailClosedError
 from iceberg.market.clock import MarketClock
 from iceberg.portfolio.portfolio import Portfolio
@@ -45,7 +46,22 @@ class RiskEngine:
         gross_trade_value: Decimal,
         capital_required: Decimal,
         risk_assessment: str,
+        approved_at: datetime,
+        charge_schedule_version: str,
     ) -> RiskDecision:
+        authorization = None
+        if quantity > 0 and proposal.side is not TradeSide.HOLD:
+            authorization = _issue_execution_authorization(
+                decision_id=proposal.decision_id,
+                symbol=proposal.symbol,
+                side=proposal.side,
+                quantity=quantity,
+                approved_price=proposal.proposed_price,
+                estimated_costs=estimated_costs,
+                capital_required=capital_required,
+                approved_at=approved_at,
+                charge_schedule_version=charge_schedule_version,
+            )
         return RiskDecision(
             approved=True,
             decision_id=proposal.decision_id,
@@ -56,6 +72,8 @@ class RiskEngine:
             gross_trade_value=money(gross_trade_value),
             capital_required=money(capital_required),
             risk_assessment=risk_assessment,
+            authorization=authorization,
+            charge_schedule_version=charge_schedule_version,
         )
 
     def evaluate(
@@ -79,7 +97,11 @@ class RiskEngine:
                 gross_trade_value=money("0"),
                 capital_required=money("0"),
                 risk_assessment="HOLD_NO_EXECUTION",
+                approved_at=now,
+                charge_schedule_version="none",
             )
+        if proposal.asset_class is not AssetClass.INDIAN_EQUITY:
+            return self.reject("UNSUPPORTED_ASSET_CLASS", proposal)
         if not self.settings.testing.paper_trading_enabled:
             return self.reject("PAPER_TRADING_DISABLED", proposal)
         if self.settings.testing.trading_mode is not TradingMode.FULLY_AUTOMATED_PAPER:
@@ -103,7 +125,7 @@ class RiskEngine:
         if proposal.side is TradeSide.BUY:
             return self._evaluate_buy(proposal, portfolio, capital, market_data, market_clock, now)
         if proposal.side is TradeSide.SELL:
-            return self._evaluate_sell(proposal, portfolio, capital, market_data)
+            return self._evaluate_sell(proposal, portfolio, capital, market_data, now)
         return self.reject("UNKNOWN_SIDE", proposal)
 
     def _evaluate_buy(
@@ -126,8 +148,8 @@ class RiskEngine:
             return self.reject("MAX_POSITIONS", proposal)
 
         price = money(proposal.proposed_price)
-        current_exposure = portfolio.exposure(proposal.symbol, mark_price=price)
-        max_quantity = capital.max_whole_shares_for_price(price, current_exposure)
+        current_cost_basis = portfolio.gross_cost_basis(proposal.symbol)
+        max_quantity = capital.max_whole_shares_for_price(price, current_cost_basis)
         if max_quantity <= 0:
             return self.reject("POSITION_LIMIT", proposal)
         quantity = proposal.quantity if proposal.quantity is not None else max_quantity
@@ -139,7 +161,8 @@ class RiskEngine:
         if capital.state.deployed_capital + gross > capital.state.daily_starting_capital * self.settings.capital.maximum_portfolio_allocation:
             return self.reject("PORTFOLIO_ALLOCATION_LIMIT", proposal)
         try:
-            costs = self.cost_model.estimate(TradeSide.BUY, price, quantity).total
+            cost_breakdown = self.cost_model.estimate(TradeSide.BUY, price, quantity)
+            costs = cost_breakdown.total
         except Exception:
             return self.reject("TRANSACTION_COSTS_UNAVAILABLE", proposal)
         try:
@@ -158,6 +181,8 @@ class RiskEngine:
             gross_trade_value=gross,
             capital_required=required,
             risk_assessment="APPROVED_BY_RISK_ENGINE",
+            approved_at=now,
+            charge_schedule_version=cost_breakdown.schedule_version,
         )
 
     def _evaluate_sell(
@@ -166,6 +191,7 @@ class RiskEngine:
         portfolio: Portfolio,
         capital: CapitalGuard,
         market_data: MarketDataSnapshot,
+        now: datetime,
     ) -> RiskDecision:
         position = portfolio.positions.get(proposal.symbol)
         if position is None:
@@ -176,7 +202,8 @@ class RiskEngine:
         price = money(proposal.proposed_price)
         gross = price * quantity
         try:
-            costs = self.cost_model.estimate(TradeSide.SELL, price, quantity).total
+            cost_breakdown = self.cost_model.estimate(TradeSide.SELL, price, quantity)
+            costs = cost_breakdown.total
         except Exception:
             return self.reject("TRANSACTION_COSTS_UNAVAILABLE", proposal)
         return self.approve(
@@ -186,6 +213,8 @@ class RiskEngine:
             gross_trade_value=gross,
             capital_required=money("0"),
             risk_assessment="APPROVED_CONTROLLED_EXIT",
+            approved_at=now,
+            charge_schedule_version=cost_breakdown.schedule_version,
         )
 
     def _validate_market_data(self, proposal: TradeProposal, market_data: MarketDataSnapshot, now: datetime) -> str | None:

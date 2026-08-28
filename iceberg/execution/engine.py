@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
-from iceberg.domain.enums import Permission
-from iceberg.domain.models import OrderExecution, RiskDecision, TradeProposal
+from iceberg.capital.guard import CapitalGuard
+from iceberg.domain.models import MarketDataSnapshot, OrderExecution, RiskDecision, TradeProposal
 from iceberg.execution.brokers import BrokerInterface
 from iceberg.logging.audit import InMemoryAuditLogger
+from iceberg.market.clock import MarketClock
+from iceberg.portfolio.portfolio import Portfolio
 from iceberg.risk.emergency import EmergencyStop
+from iceberg.risk.engine import RiskEngine
 from iceberg.risk.permissions import PermissionManager
 
 
+@dataclass(frozen=True)
+class ExecutionResult:
+    decision: RiskDecision
+    execution: OrderExecution | None
+
+
 class ExecutionEngine:
-    """Final permission gate before a broker receives a risk-approved order."""
+    """Coordinator that obtains risk authorization before broker execution."""
 
     def __init__(
         self,
@@ -25,7 +35,35 @@ class ExecutionEngine:
         self.emergency_stop = emergency_stop
         self.permissions = permissions
 
-    def execute(
+    def submit_proposal(
+        self,
+        proposal: TradeProposal,
+        *,
+        risk_engine: RiskEngine,
+        portfolio: Portfolio,
+        capital: CapitalGuard,
+        market_data: MarketDataSnapshot | None,
+        market_clock: MarketClock,
+        now: datetime,
+        idempotency_key: str,
+    ) -> ExecutionResult:
+        decision = risk_engine.evaluate(
+            proposal,
+            portfolio=portfolio,
+            capital=capital,
+            market_data=market_data,
+            permissions=self.permissions,
+            emergency_stop=self.emergency_stop,
+            market_clock=market_clock,
+            now=now,
+        )
+        if not decision.approved or decision.authorization is None:
+            self.audit_logger.log(proposal, decision, None, timestamp=now)
+            return ExecutionResult(decision=decision, execution=None)
+        execution = self._execute_authorized(proposal, decision, idempotency_key=idempotency_key, now=now)
+        return ExecutionResult(decision=decision, execution=execution)
+
+    def _execute_authorized(
         self,
         proposal: TradeProposal,
         decision: RiskDecision,
@@ -33,22 +71,6 @@ class ExecutionEngine:
         idempotency_key: str,
         now: datetime | None = None,
     ) -> OrderExecution:
-        if not self.permissions.has(Permission.PAPER_TRADE):
-            decision = RiskDecision(
-                approved=False,
-                decision_id=proposal.decision_id,
-                symbol=proposal.symbol,
-                side=proposal.side,
-                rejection_reason="PERMISSION_DENIED",
-            )
-        elif self.emergency_stop.blocks(proposal.side):
-            decision = RiskDecision(
-                approved=False,
-                decision_id=proposal.decision_id,
-                symbol=proposal.symbol,
-                side=proposal.side,
-                rejection_reason="EMERGENCY_STOP",
-            )
-        execution = self.broker.submit_order(proposal, decision, idempotency_key, now)
+        execution = self.broker.submit_order(proposal, decision.authorization, idempotency_key, now)
         self.audit_logger.log(proposal, decision, execution, timestamp=now)
         return execution

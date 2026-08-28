@@ -26,19 +26,18 @@ def test_multiple_positions_stop_before_transaction_costs_create_negative_cash(s
     for idx in range(10):
         symbol = f"STK{idx}"
         proposal = TradeProposal.buy(symbol, price=D("10"), decision_id=f"d-{idx}")
-        decision = safe_context.risk.evaluate(
+        result = engine.submit_proposal(
             proposal,
+            risk_engine=safe_context.risk,
             portfolio=safe_context.portfolio,
             capital=safe_context.guard,
             market_data=market_snapshot(symbol, "10", safe_context.now),
-            permissions=safe_context.permissions,
-            emergency_stop=safe_context.emergency_stop,
             market_clock=safe_context.clock,
             now=safe_context.now,
+            idempotency_key=f"k-{idx}",
         )
-        if decision.approved:
+        if result.decision.approved:
             approvals += 1
-            engine.execute(proposal, decision, idempotency_key=f"k-{idx}", now=safe_context.now)
 
     assert approvals == 9
     assert safe_context.guard.state.available_cash == D("9.10")

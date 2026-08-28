@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from iceberg.domain.models import require_aware
+from iceberg.exceptions import FailClosedError
 
 
 @dataclass(frozen=True)
@@ -23,3 +24,8 @@ class FeaturePipeline:
     def filter_available(self, features: list[FeatureValue], decision_time: datetime) -> tuple[FeatureValue, ...]:
         require_aware(decision_time, "decision_time")
         return tuple(feature for feature in features if feature.available_at <= decision_time)
+
+    def validate_no_future_features(self, features: list[FeatureValue], decision_time: datetime) -> None:
+        require_aware(decision_time, "decision_time")
+        if any(feature.available_at > decision_time for feature in features):
+            raise FailClosedError("future feature timestamp detected")
