@@ -26,9 +26,16 @@ class BacktestMarketDataAdapter:
     def uses_simulated_liquidity(self) -> bool:
         return self.liquidity_assumptions is not None
 
-    def snapshot(self, symbol: str, price: Decimal, timestamp: datetime) -> MarketDataSnapshot:
+    def snapshot(
+        self,
+        symbol: str,
+        price: Decimal,
+        timestamp: datetime,
+        *,
+        observed_volume: Decimal | None = None,
+    ) -> MarketDataSnapshot:
         if self.liquidity_assumptions is None:
-            return MarketDataSnapshot(symbol=symbol, last_price=price, timestamp=timestamp)
+            return MarketDataSnapshot(symbol=symbol, last_price=price, timestamp=timestamp, observed_volume=observed_volume)
         profile = self.liquidity_assumptions
         return MarketDataSnapshot(
             symbol=symbol,
@@ -40,4 +47,5 @@ class BacktestMarketDataAdapter:
             recent_activity=profile.recent_activity,
             estimated_price_impact_fraction=profile.estimated_price_impact_fraction,
             abnormal_volatility=profile.abnormal_volatility,
+            observed_volume=observed_volume,
         )

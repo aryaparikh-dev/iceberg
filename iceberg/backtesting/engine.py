@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from statistics import mean, pstdev
@@ -26,7 +27,20 @@ from iceberg.risk.emergency import EmergencyStop
 from iceberg.risk.engine import RiskEngine
 from iceberg.risk.permissions import PermissionManager
 from iceberg.risk.slippage import SlippageModel
+from iceberg.research.results import DailyEquityPoint, TradeLedgerEntry
 from iceberg.strategies.base import Strategy
+
+
+def _json_default(value):
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if hasattr(value, "value"):
+        return value.value
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    raise TypeError(f"{type(value)!r} is not JSON serializable")
 
 
 @dataclass
@@ -55,6 +69,37 @@ class BacktestReport:
     metric_unavailable_reasons: dict[str, str] = field(default_factory=dict)
     execution_convention: ExecutionConvention = ExecutionConvention.SIGNAL_ON_BAR_CLOSE_EXECUTE_NEXT_BAR_OPEN
     liquidity_assumptions_used: bool = False
+    experiment_id: str | None = None
+    strategy_name: str = "unknown"
+    strategy_version: str = "unversioned"
+    parameter_set: dict = field(default_factory=dict)
+    universe: str = "unspecified"
+    symbols_tested: tuple[str, ...] = field(default_factory=tuple)
+    date_range: tuple[date | None, date | None] = (None, None)
+    bar_interval: str = "unknown"
+    initial_ai_capital: Decimal = money("0")
+    ending_ai_capital: Decimal = money("0")
+    gross_profit: Decimal = money("0")
+    largest_win: Decimal | None = None
+    largest_loss: Decimal | None = None
+    capital_utilization: Decimal | None = None
+    average_holding_time_seconds: Decimal | None = None
+    exposure_time_fraction: Decimal | None = None
+    turnover: Decimal | None = None
+    liquidity_assumption_details: dict = field(default_factory=dict)
+    transaction_cost_schedule_used: str = "unspecified"
+    transaction_cost_schedule_verified: bool = False
+    adjustment_mode: str = "RAW"
+    survivorship_bias_risk: bool = True
+    data_quality_status: str = "NOT_SUPPLIED"
+    benchmark_results: dict = field(default_factory=dict)
+    trade_ledger: tuple[TradeLedgerEntry, ...] = field(default_factory=tuple)
+    daily_equity_curve: tuple[DailyEquityPoint, ...] = field(default_factory=tuple)
+    regime_analysis: dict = field(default_factory=dict)
+    attribution: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return json.loads(json.dumps(asdict(self), default=_json_default, sort_keys=True))
 
 
 class BacktestEngine:
@@ -110,14 +155,28 @@ class BacktestEngine:
         pending: list[TradeProposal] = []
         latest_prices: dict[str, Decimal] = {}
         equity_curve = [capital.state.total_equity]
+        daily_equity_curve: list[DailyEquityPoint] = []
         current_day: date | None = None
+        current_day_starting_capital: Decimal | None = None
+        peak_daily_capital = capital.state.total_equity
 
         for now, symbol, candle in timeline:
             if current_day != now.date():
                 if current_day is not None:
-                    self._finish_day(capital, portfolio, broker, current_day)
+                    settlement = self._finish_day(capital, portfolio, broker, current_day)
+                    point = self._daily_equity_point(
+                        current_day,
+                        current_day_starting_capital or capital.state.daily_starting_capital,
+                        settlement.user_distribution,
+                        capital,
+                        audit,
+                        peak_daily_capital,
+                    )
+                    daily_equity_curve.append(point)
+                    peak_daily_capital = max(peak_daily_capital, point.ending_ai_capital)
                 manager.start_trading_day(now.date(), now.replace(hour=9, minute=0, second=0, microsecond=0))
                 current_day = now.date()
+                current_day_starting_capital = capital.state.daily_starting_capital
 
             pending = self._execute_pending(pending, candle, engine, risk, portfolio, capital, clock, now)
 
@@ -136,6 +195,7 @@ class BacktestEngine:
                 self._force_exit_on_candle(
                     symbol,
                     candle.close,
+                    candle.volume,
                     now,
                     portfolio,
                     capital,
@@ -149,10 +209,29 @@ class BacktestEngine:
             equity_curve.append(capital.state.total_equity)
 
         if current_day is not None:
-            self._finish_day(capital, portfolio, broker, current_day)
+            settlement = self._finish_day(capital, portfolio, broker, current_day)
+            point = self._daily_equity_point(
+                current_day,
+                current_day_starting_capital or capital.state.daily_starting_capital,
+                settlement.user_distribution,
+                capital,
+                audit,
+                peak_daily_capital,
+            )
+            daily_equity_curve.append(point)
             equity_curve.append(capital.state.total_equity)
 
-        return self._report(capital, audit, equity_curve)
+        start_date = min((row[0].date() for row in timeline), default=None)
+        end_date = max((row[0].date() for row in timeline), default=None)
+        return self._report(
+            capital,
+            audit,
+            equity_curve,
+            strategy=strategy,
+            symbols_tested=tuple(sorted(candles_by_symbol)),
+            date_range=(start_date, end_date),
+            daily_equity_curve=tuple(daily_equity_curve),
+        )
 
     def _execute_pending(
         self,
@@ -176,7 +255,12 @@ class BacktestEngine:
                 risk_engine=risk,
                 portfolio=portfolio,
                 capital=capital,
-                market_data=self.market_data_adapter.snapshot(executable.symbol, executable.proposed_price, now),
+                market_data=self.market_data_adapter.snapshot(
+                    executable.symbol,
+                    executable.proposed_price,
+                    now,
+                    observed_volume=candle.volume,
+                ),
                 market_clock=clock,
                 now=now,
                 idempotency_key=executable.decision_id,
@@ -208,7 +292,7 @@ class BacktestEngine:
         portfolio: Portfolio,
         broker: PaperBroker,
         trading_day: date,
-    ) -> None:
+    ):
         if not broker.reconcile():
             capital.mark_portfolio_uncertain()
             raise ReconciliationError("backtest reconciliation failed")
@@ -218,12 +302,13 @@ class BacktestEngine:
         if not broker.reconcile():
             capital.mark_portfolio_uncertain()
             raise ReconciliationError("backtest reconciliation failed before settlement")
-        capital.settle_trading_day(portfolio)
+        return capital.settle_trading_day(portfolio)
 
     def _force_exit_on_candle(
         self,
         symbol: str,
         price: Decimal,
+        volume: Decimal,
         now: datetime,
         portfolio: Portfolio,
         capital: CapitalGuard,
@@ -239,7 +324,12 @@ class BacktestEngine:
                 risk_engine=risk,
                 portfolio=portfolio,
                 capital=capital,
-                market_data=self.market_data_adapter.snapshot(proposal.symbol, proposal.proposed_price, now),
+                market_data=self.market_data_adapter.snapshot(
+                    proposal.symbol,
+                    proposal.proposed_price,
+                    now,
+                    observed_volume=volume,
+                ),
                 market_clock=clock,
                 now=now,
                 idempotency_key=proposal.decision_id,
@@ -260,9 +350,19 @@ class BacktestEngine:
         for symbol, candles in candles_by_symbol.items():
             for candle in sorted(candles, key=lambda c: c.timestamp):
                 rows.append((candle.timestamp, symbol.upper(), candle))
-        return sorted(rows, key=lambda row: row[0])
+        return sorted(rows, key=lambda row: (row[0], row[1]))
 
-    def _report(self, capital: CapitalGuard, audit: InMemoryAuditLogger, equity_curve: list[Decimal]) -> BacktestReport:
+    def _report(
+        self,
+        capital: CapitalGuard,
+        audit: InMemoryAuditLogger,
+        equity_curve: list[Decimal],
+        *,
+        strategy: Strategy | None = None,
+        symbols_tested: tuple[str, ...] = tuple(),
+        date_range: tuple[date | None, date | None] = (None, None),
+        daily_equity_curve: tuple[DailyEquityPoint, ...] = tuple(),
+    ) -> BacktestReport:
         execution_records = [record for record in audit.records if record.order_id and record.rejection_reason is None]
         exits = [record for record in execution_records if record.decision == TradeSide.SELL.value]
         pnl_values = [record.net_pnl for record in exits]
@@ -271,11 +371,13 @@ class BacktestEngine:
         rejected: dict[str, int] = {}
         total_costs = money("0")
         slippage = money("0")
+        gross_profit = money("0")
         for record in audit.records:
             if record.rejection_reason:
                 rejected[record.rejection_reason] = rejected.get(record.rejection_reason, 0) + 1
             total_costs += record.transaction_costs
             slippage += abs(record.slippage)
+            gross_profit += record.gross_pnl
         starting = capital.state.starting_capital
         ending = capital.state.total_equity
         net_profit = ending - starting
@@ -291,6 +393,20 @@ class BacktestEngine:
         expectancy = None if not pnl_values else sum(pnl_values, Decimal("0")) / Decimal(len(pnl_values))
         if expectancy is None:
             metric_reasons["expectancy"] = "no closed trades"
+        trade_ledger = self._trade_ledger(audit.records, starting)
+        largest_win = max(wins) if wins else None
+        largest_loss = min(losses) if losses else None
+        if trade_ledger:
+            holding = [entry.holding_duration_seconds for entry in trade_ledger if entry.holding_duration_seconds is not None]
+            average_holding = None if not holding else Decimal(sum(holding)) / Decimal(len(holding))
+        else:
+            average_holding = None
+            metric_reasons["average_holding_time_seconds"] = "no completed trades"
+        turnover = None if starting == 0 else sum((record.gross_pnl + abs(record.net_pnl) for record in exits), Decimal("0")) / starting
+        utilization = None if starting == 0 else max((point.starting_capital for point in daily_equity_curve), default=starting) / starting
+        cost_schedule, cost_verified = self._cost_schedule_metadata()
+        regime_analysis = self._regime_analysis(exits)
+        attribution = self._attribution(exits)
         return BacktestReport(
             starting_capital=starting,
             ending_capital=ending,
@@ -316,7 +432,143 @@ class BacktestEngine:
             metric_unavailable_reasons=metric_reasons,
             execution_convention=self.execution_convention,
             liquidity_assumptions_used=self.market_data_adapter.uses_simulated_liquidity,
+            strategy_name=getattr(strategy, "name", "unknown"),
+            strategy_version=getattr(strategy, "version", "unversioned"),
+            parameter_set=getattr(strategy, "parameters", {}),
+            symbols_tested=symbols_tested,
+            date_range=date_range,
+            initial_ai_capital=starting,
+            ending_ai_capital=capital.state.next_day_capital,
+            gross_profit=gross_profit,
+            largest_win=largest_win,
+            largest_loss=largest_loss,
+            capital_utilization=utilization,
+            average_holding_time_seconds=average_holding,
+            exposure_time_fraction=None,
+            turnover=turnover,
+            liquidity_assumption_details=self._liquidity_assumption_details(),
+            transaction_cost_schedule_used=cost_schedule,
+            transaction_cost_schedule_verified=cost_verified,
+            trade_ledger=trade_ledger,
+            daily_equity_curve=daily_equity_curve,
+            regime_analysis=regime_analysis,
+            attribution=attribution,
         )
+
+    def _daily_equity_point(
+        self,
+        trading_day: date,
+        starting_capital: Decimal,
+        distribution: Decimal,
+        capital: CapitalGuard,
+        audit: InMemoryAuditLogger,
+        peak_daily_capital: Decimal,
+    ) -> DailyEquityPoint:
+        records = [record for record in audit.records if record.timestamp is not None and record.timestamp.date() == trading_day]
+        gross = sum((record.gross_pnl for record in records), Decimal("0"))
+        costs = sum((record.transaction_costs for record in records), Decimal("0"))
+        slippage = sum((abs(record.slippage) for record in records), Decimal("0"))
+        net = sum((record.net_pnl for record in records), Decimal("0"))
+        ending = capital.state.next_day_capital
+        peak = max(peak_daily_capital, ending)
+        drawdown = money("0") if peak == 0 else (peak - ending) / peak
+        return DailyEquityPoint(trading_day, starting_capital, gross, costs, slippage, net, distribution, ending, drawdown)
+
+    def _trade_ledger(self, records, starting_capital: Decimal) -> tuple[TradeLedgerEntry, ...]:
+        open_entries: dict[str, list] = {}
+        ledger: list[TradeLedgerEntry] = []
+        for record in records:
+            if not record.order_id or record.rejection_reason or record.execution_price is None:
+                continue
+            if record.decision == TradeSide.BUY.value:
+                open_entries.setdefault(record.symbol, []).append(record)
+                continue
+            if record.decision != TradeSide.SELL.value:
+                continue
+            if not open_entries.get(record.symbol):
+                continue
+            entry = open_entries[record.symbol].pop(0)
+            entry_value = entry.execution_price * record.quantity if entry.execution_price is not None else money("0")
+            duration = None
+            if entry.timestamp is not None and record.timestamp is not None:
+                duration = int((record.timestamp - entry.timestamp).total_seconds())
+            return_pct = None if entry_value == 0 else record.net_pnl / entry_value
+            allocation = None if starting_capital == 0 else entry_value / starting_capital
+            ledger.append(
+                TradeLedgerEntry(
+                    trade_id=f"TRADE-{len(ledger) + 1}",
+                    decision_id=record.decision_id,
+                    symbol=record.symbol,
+                    strategy=entry.strategy,
+                    entry_signal_timestamp=entry.timestamp,
+                    entry_execution_timestamp=entry.timestamp,
+                    entry_price=entry.execution_price,
+                    quantity=record.quantity,
+                    entry_costs=entry.transaction_costs,
+                    exit_signal_timestamp=record.timestamp,
+                    exit_execution_timestamp=record.timestamp,
+                    exit_price=record.execution_price,
+                    exit_costs=record.transaction_costs,
+                    gross_pnl=record.gross_pnl,
+                    net_pnl=record.net_pnl,
+                    return_percentage=return_pct,
+                    holding_duration_seconds=duration,
+                    exit_reason="FORCED_EXIT" if record.strategy == "ExitManager" else "STRATEGY_EXIT",
+                    market_regime=record.market_regime,
+                    slippage=entry.slippage + record.slippage,
+                    capital_at_entry=starting_capital,
+                    position_allocation_percentage=allocation,
+                )
+            )
+        return tuple(ledger)
+
+    def _cost_schedule_metadata(self) -> tuple[str, bool]:
+        charges = getattr(self.cost_model, "charges", None)
+        if charges is not None and hasattr(charges, "metadata"):
+            metadata = charges.metadata()
+            return str(metadata["schedule_version"]), bool(metadata["verified"])
+        return getattr(self.cost_model, "schedule_version", self.cost_model.__class__.__name__), False
+
+    def _liquidity_assumption_details(self) -> dict:
+        profile = self.market_data_adapter.liquidity_assumptions
+        if profile is None:
+            return {"used": False}
+        return {
+            "used": True,
+            "name": profile.name,
+            "average_volume": str(profile.average_volume),
+            "average_traded_value": str(profile.average_traded_value),
+            "bid_ask_spread_fraction": str(profile.bid_ask_spread_fraction),
+            "estimated_price_impact_fraction": str(profile.estimated_price_impact_fraction),
+        }
+
+    def _regime_analysis(self, exits) -> dict:
+        result: dict[str, dict] = {}
+        for record in exits:
+            regime = record.market_regime or "UNKNOWN"
+            item = result.setdefault(regime, {"trades": 0, "wins": 0, "net_pnl": money("0")})
+            item["trades"] += 1
+            item["wins"] += int(record.net_pnl > 0)
+            item["net_pnl"] += record.net_pnl
+        for item in result.values():
+            item["win_rate"] = money("0") if item["trades"] == 0 else Decimal(item["wins"]) / Decimal(item["trades"])
+        return result
+
+    def _attribution(self, exits) -> dict:
+        attribution = {"symbol": {}, "month": {}, "year": {}, "strategy": {}, "regime": {}}
+        for record in exits:
+            keys = {
+                "symbol": record.symbol,
+                "month": record.timestamp.strftime("%Y-%m") if record.timestamp else "UNKNOWN",
+                "year": record.timestamp.strftime("%Y") if record.timestamp else "UNKNOWN",
+                "strategy": record.strategy,
+                "regime": record.market_regime or "UNKNOWN",
+            }
+            for bucket, key in keys.items():
+                item = attribution[bucket].setdefault(key, {"trades": 0, "net_pnl": money("0")})
+                item["trades"] += 1
+                item["net_pnl"] += record.net_pnl
+        return attribution
 
     def _max_drawdown(self, equity_curve: list[Decimal]) -> Decimal:
         peak = equity_curve[0] if equity_curve else money("0")

@@ -1,0 +1,19 @@
+# Synthetic/demo-only research configuration. Do not infer real NSE performance from this file.
+
+[data]
+path = "tests/fixtures/sample_ohlcv.csv"
+symbol = "ABC"
+interval = "1m"
+source_id = "synthetic-fixture"
+adjustment_mode = "RAW"
+
+[research]
+strategy = "momentum"
+initial_capital = "100"
+transaction_cost_schedule = "explicit-fixed-research-cli"
+slippage_model = "FixedBpsSlippageModel(0)"
+assume_liquidity = true
+
+[safety]
+live_trading_enabled = false
+broker_connection_enabled = false

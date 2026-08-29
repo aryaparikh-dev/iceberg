@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 
 from iceberg.domain.enums import TradeSide
@@ -45,6 +46,11 @@ class NSEIntradayCharges:
     stamp_duty_buy_rate: Decimal
     gst_rate: Decimal
     schedule_version: str
+    schedule_name: str = "nse-intraday-explicit"
+    effective_from: date | None = None
+    effective_to: date | None = None
+    source_reference: str = ""
+    verified: bool = False
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -58,6 +64,18 @@ class NSEIntradayCharges:
             setattr(self, field_name, money(getattr(self, field_name)))
         if not self.schedule_version:
             raise FailClosedError("transaction charge schedule version is required")
+        if self.verified and not self.source_reference:
+            raise FailClosedError("verified transaction charge schedules require a source reference")
+
+    def metadata(self) -> dict[str, str | bool | None]:
+        return {
+            "schedule_name": self.schedule_name,
+            "schedule_version": self.schedule_version,
+            "effective_from": self.effective_from.isoformat() if self.effective_from else None,
+            "effective_to": self.effective_to.isoformat() if self.effective_to else None,
+            "source_reference": self.source_reference,
+            "verified": self.verified,
+        }
 
 
 class NSEIntradayCostModel(TransactionCostModel):

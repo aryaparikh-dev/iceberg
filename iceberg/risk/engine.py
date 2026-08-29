@@ -245,6 +245,11 @@ class RiskEngine:
             return "LIQUIDITY_REJECTED"
         if market_data.abnormal_volatility:
             return "LIQUIDITY_REJECTED"
+        if proposal.quantity is not None and market_data.observed_volume is not None:
+            if market_data.observed_volume <= 0:
+                return "LIQUIDITY_REJECTED"
+            if Decimal(proposal.quantity) > market_data.observed_volume * self.settings.risk.max_participation_rate:
+                return "PARTICIPATION_RATE_LIMIT"
         return None
 
     def _daily_loss_fraction(self, capital: CapitalGuard) -> Decimal:
