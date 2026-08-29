@@ -28,17 +28,20 @@ class AuditRecord:
     risk_decision: str
     approval_status: str
     rejection_reason: str | None
+    authorization_id: str | None = None
     order_id: str | None = None
     execution_price: Decimal | None = None
     slippage: Decimal = money("0")
     gross_pnl: Decimal = money("0")
     transaction_costs: Decimal = money("0")
     net_pnl: Decimal = money("0")
+    charge_schedule_version: str = "unspecified"
 
 
 @dataclass
 class InMemoryAuditLogger:
     records: list[AuditRecord] = field(default_factory=list)
+    store: object | None = None
 
     def log(
         self,
@@ -67,13 +70,20 @@ class InMemoryAuditLogger:
             risk_decision=decision.rejection_reason or "APPROVED",
             approval_status=decision.approval_status.value,
             rejection_reason=decision.rejection_reason,
+            authorization_id=getattr(decision.authorization, "authorization_id", None),
+            charge_schedule_version=decision.charge_schedule_version,
         )
         if execution is not None:
             record.order_id = execution.order_id
             record.execution_price = execution.execution_price
             record.slippage = execution.slippage
             record.transaction_costs = execution.transaction_costs
+            record.gross_pnl = execution.gross_pnl
+            record.net_pnl = execution.net_pnl
+            record.charge_schedule_version = execution.charge_schedule_version
         self.records.append(record)
+        if self.store is not None:
+            self.store.save_audit_record(record)
         return record
 
     def as_dicts(self) -> list[dict[str, Any]]:

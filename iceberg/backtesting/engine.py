@@ -1,24 +1,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
+from statistics import mean, pstdev
 
 from iceberg.ai.regime import RegimeDetector
+from iceberg.backtesting.market_data import BacktestMarketDataAdapter, SimulatedLiquidityAssumptionProfile
 from iceberg.capital.guard import CapitalGuard
+from iceberg.capital.manager import CapitalManager
 from iceberg.config.settings import Settings, default_settings
 from iceberg.data.validation import DataValidator
-from iceberg.domain.models import Candle, MarketDataSnapshot, money
+from iceberg.domain.enums import ExecutionConvention, TradeSide
+from iceberg.domain.models import Candle, TradeProposal, money
+from iceberg.exceptions import ConfigurationError, ReconciliationError
 from iceberg.execution.brokers import PaperBroker
 from iceberg.execution.engine import ExecutionEngine
+from iceberg.execution.exit_manager import ExitManager
 from iceberg.logging.audit import InMemoryAuditLogger
-from iceberg.market.calendar import TradingCalendar
+from iceberg.market.calendar import TradingCalendar, UnknownTradingCalendar
 from iceberg.market.clock import MarketClock
 from iceberg.portfolio.portfolio import Portfolio
-from iceberg.risk.costs import FixedTransactionCostModel, TransactionCostModel
+from iceberg.risk.costs import TransactionCostModel
 from iceberg.risk.emergency import EmergencyStop
 from iceberg.risk.engine import RiskEngine
 from iceberg.risk.permissions import PermissionManager
+from iceberg.risk.slippage import SlippageModel
 from iceberg.strategies.base import Strategy
 
 
@@ -35,6 +42,7 @@ class BacktestReport:
     average_win: Decimal
     average_loss: Decimal
     profit_factor: Decimal | None
+    expectancy: Decimal | None
     maximum_drawdown: Decimal
     sharpe: Decimal | None
     sortino: Decimal | None
@@ -44,6 +52,9 @@ class BacktestReport:
     final_ai_capital: Decimal
     rejected_trades: int
     rejection_reasons: dict[str, int] = field(default_factory=dict)
+    metric_unavailable_reasons: dict[str, str] = field(default_factory=dict)
+    execution_convention: ExecutionConvention = ExecutionConvention.SIGNAL_ON_BAR_CLOSE_EXECUTE_NEXT_BAR_OPEN
+    liquidity_assumptions_used: bool = False
 
 
 class BacktestEngine:
@@ -52,72 +63,197 @@ class BacktestEngine:
         *,
         settings: Settings | None = None,
         cost_model: TransactionCostModel | None = None,
+        slippage_model: SlippageModel | None = None,
         calendar: TradingCalendar | None = None,
+        liquidity_assumption_profile: SimulatedLiquidityAssumptionProfile | None = None,
+        execution_convention: ExecutionConvention = ExecutionConvention.SIGNAL_ON_BAR_CLOSE_EXECUTE_NEXT_BAR_OPEN,
+        store=None,
     ) -> None:
         self.settings = settings or default_settings()
-        self.cost_model = cost_model or FixedTransactionCostModel()
-        self.calendar = calendar or TradingCalendar(provider_verified=True)
+        if cost_model is None:
+            raise ConfigurationError("backtests require an explicit transaction cost model")
+        if slippage_model is None:
+            raise ConfigurationError("backtests require an explicit slippage model")
+        self.cost_model = cost_model
+        self.slippage_model = slippage_model
+        self.calendar = calendar or UnknownTradingCalendar()
+        self.market_data_adapter = BacktestMarketDataAdapter(liquidity_assumption_profile)
+        self.execution_convention = execution_convention
+        self.store = store
 
     def run(self, candles_by_symbol: dict[str, list[Candle]], strategy: Strategy) -> BacktestReport:
-        capital = CapitalGuard.initial(self.settings.capital.initial_capital_inr, settings=self.settings)
+        capital = CapitalGuard.initial(self.settings.capital.initial_capital_inr, settings=self.settings, store=self.store)
         portfolio = Portfolio()
+        if self.store is not None:
+            portfolio.persist(self.store)
         permissions = PermissionManager.default_ai()
-        emergency_stop = EmergencyStop(active=False)
+        emergency_stop = EmergencyStop(active=False, store=self.store)
         clock = MarketClock(self.calendar, self.settings.market)
         risk = RiskEngine(self.settings, self.cost_model)
-        audit = InMemoryAuditLogger()
-        broker = PaperBroker(portfolio, capital, self.cost_model, settlement_lag_days=0)
+        audit = InMemoryAuditLogger(store=self.store)
+        broker = PaperBroker(
+            portfolio,
+            capital,
+            self.cost_model,
+            slippage_model=self.slippage_model,
+            settlement_lag_days=0,
+            store=self.store,
+        )
         engine = ExecutionEngine(broker, audit, emergency_stop, permissions)
+        exits = ExitManager(clock)
         regime_detector = RegimeDetector()
         validator = DataValidator(self.settings.data.max_market_data_age)
+        manager = CapitalManager(capital, None, self.settings, self.calendar)
 
         timeline = self._timeline(candles_by_symbol)
-        if timeline:
-            first_timestamp = timeline[0][0]
-            capital.create_daily_snapshot(
-                first_timestamp.date(),
-                first_timestamp.replace(hour=9, minute=0, second=0, microsecond=0),
-            )
-        equity_curve = [capital.state.total_equity]
         histories: dict[str, list[Candle]] = {symbol.upper(): [] for symbol in candles_by_symbol}
+        pending: list[TradeProposal] = []
+        latest_prices: dict[str, Decimal] = {}
+        equity_curve = [capital.state.total_equity]
+        current_day: date | None = None
 
         for now, symbol, candle in timeline:
-            symbol = symbol.upper()
+            if current_day != now.date():
+                if current_day is not None:
+                    self._finish_day(capital, portfolio, broker, current_day)
+                manager.start_trading_day(now.date(), now.replace(hour=9, minute=0, second=0, microsecond=0))
+                current_day = now.date()
+
+            pending = self._execute_pending(pending, candle, engine, risk, portfolio, capital, clock, now)
+
             histories[symbol].append(candle)
             validator.validate_candles(histories[symbol], expected_symbol=symbol, now=now)
+            latest_prices[symbol] = candle.close
+
             regime = regime_detector.detect(histories[symbol])
-            proposals = strategy.generate(symbol, tuple(histories[symbol]), now, regime)
-            for proposal in proposals:
-                if proposal.side.value == "HOLD":
+            for proposal in strategy.generate(symbol, tuple(histories[symbol]), now, regime):
+                if proposal.side is not TradeSide.HOLD:
+                    pending.append(proposal)
+                else:
                     audit.log(proposal, risk.reject("HOLD_NO_EXECUTION", proposal), timestamp=now)
-                    continue
-                market_data = MarketDataSnapshot(
-                    symbol=symbol,
-                    last_price=candle.close,
-                    timestamp=now,
-                    average_volume=max(candle.volume, Decimal("100000")),
-                    average_traded_value=max(candle.volume * candle.close, Decimal("10000000")),
-                    bid_ask_spread_fraction=Decimal("0.001"),
-                    recent_activity=True,
-                    estimated_price_impact_fraction=Decimal("0.001"),
-                    abnormal_volatility=False,
+
+            if clock.is_force_exit_window(now):
+                self._force_exit_on_candle(
+                    symbol,
+                    candle.close,
+                    now,
+                    portfolio,
+                    capital,
+                    engine,
+                    risk,
+                    exits,
+                    clock,
                 )
-                decision = risk.evaluate(
-                    proposal,
-                    portfolio=portfolio,
-                    capital=capital,
-                    market_data=market_data,
-                    permissions=permissions,
-                    emergency_stop=emergency_stop,
-                    market_clock=clock,
-                    now=now,
-                )
-                engine.execute(proposal, decision, idempotency_key=proposal.decision_id, now=now)
-            mark_value = portfolio.total_market_value({symbol: candle.close})
-            capital.update_mark_to_market(mark_value)
+
+            self._mark_to_market_or_fail_closed(portfolio, capital, latest_prices)
+            equity_curve.append(capital.state.total_equity)
+
+        if current_day is not None:
+            self._finish_day(capital, portfolio, broker, current_day)
             equity_curve.append(capital.state.total_equity)
 
         return self._report(capital, audit, equity_curve)
+
+    def _execute_pending(
+        self,
+        pending: list[TradeProposal],
+        candle: Candle,
+        engine: ExecutionEngine,
+        risk: RiskEngine,
+        portfolio: Portfolio,
+        capital: CapitalGuard,
+        clock: MarketClock,
+        now: datetime,
+    ) -> list[TradeProposal]:
+        remaining: list[TradeProposal] = []
+        for proposal in pending:
+            if proposal.symbol != candle.symbol:
+                remaining.append(proposal)
+                continue
+            executable = self._next_bar_open_proposal(proposal, candle.open, now)
+            engine.submit_proposal(
+                executable,
+                risk_engine=risk,
+                portfolio=portfolio,
+                capital=capital,
+                market_data=self.market_data_adapter.snapshot(executable.symbol, executable.proposed_price, now),
+                market_clock=clock,
+                now=now,
+                idempotency_key=executable.decision_id,
+            )
+        return remaining
+
+    def _next_bar_open_proposal(self, proposal: TradeProposal, open_price: Decimal, now: datetime) -> TradeProposal:
+        return TradeProposal(
+            decision_id=proposal.decision_id,
+            symbol=proposal.symbol,
+            side=proposal.side,
+            proposed_price=open_price,
+            strategy=proposal.strategy,
+            quantity=proposal.quantity,
+            timestamp=now,
+            signal_type=proposal.signal_type,
+            asset_class=proposal.asset_class,
+            confidence=proposal.confidence,
+            market_regime=proposal.market_regime,
+            key_signals=proposal.key_signals,
+            relevant_features=proposal.relevant_features,
+            stop_or_invalidation_level=proposal.stop_or_invalidation_level,
+            summary="Executed by next-bar-open convention",
+        )
+
+    def _finish_day(
+        self,
+        capital: CapitalGuard,
+        portfolio: Portfolio,
+        broker: PaperBroker,
+        trading_day: date,
+    ) -> None:
+        if not broker.reconcile():
+            capital.mark_portfolio_uncertain()
+            raise ReconciliationError("backtest reconciliation failed")
+        if not portfolio.is_flat():
+            capital.mark_portfolio_uncertain()
+            raise ReconciliationError(f"missing force-exit-window market data for {trading_day.isoformat()}")
+        if not broker.reconcile():
+            capital.mark_portfolio_uncertain()
+            raise ReconciliationError("backtest reconciliation failed before settlement")
+        capital.settle_trading_day(portfolio)
+
+    def _force_exit_on_candle(
+        self,
+        symbol: str,
+        price: Decimal,
+        now: datetime,
+        portfolio: Portfolio,
+        capital: CapitalGuard,
+        engine: ExecutionEngine,
+        risk: RiskEngine,
+        exits: ExitManager,
+        clock: MarketClock,
+    ) -> None:
+        proposals = exits.create_force_exit_proposals(portfolio, {symbol: price}, now)
+        for proposal in proposals:
+            result = engine.submit_proposal(
+                proposal,
+                risk_engine=risk,
+                portfolio=portfolio,
+                capital=capital,
+                market_data=self.market_data_adapter.snapshot(proposal.symbol, proposal.proposed_price, now),
+                market_clock=clock,
+                now=now,
+                idempotency_key=proposal.decision_id,
+            )
+            if result.execution is None or result.execution.status == "REJECTED":
+                capital.mark_portfolio_uncertain()
+                raise ReconciliationError("forced exit failed closed")
+
+    def _mark_to_market_or_fail_closed(self, portfolio: Portfolio, capital: CapitalGuard, latest_prices: dict[str, Decimal]) -> None:
+        missing = [symbol for symbol in portfolio.positions if symbol not in latest_prices]
+        if missing:
+            capital.mark_portfolio_uncertain()
+            raise ReconciliationError(f"missing price for open position: {missing[0]}")
+        capital.update_mark_to_market(portfolio.total_market_value(latest_prices))
 
     def _timeline(self, candles_by_symbol: dict[str, list[Candle]]) -> list[tuple[datetime, str, Candle]]:
         rows: list[tuple[datetime, str, Candle]] = []
@@ -127,7 +263,11 @@ class BacktestEngine:
         return sorted(rows, key=lambda row: row[0])
 
     def _report(self, capital: CapitalGuard, audit: InMemoryAuditLogger, equity_curve: list[Decimal]) -> BacktestReport:
-        executions = [record for record in audit.records if record.order_id]
+        execution_records = [record for record in audit.records if record.order_id and record.rejection_reason is None]
+        exits = [record for record in execution_records if record.decision == TradeSide.SELL.value]
+        pnl_values = [record.net_pnl for record in exits]
+        wins = [pnl for pnl in pnl_values if pnl > 0]
+        losses = [pnl for pnl in pnl_values if pnl < 0]
         rejected: dict[str, int] = {}
         total_costs = money("0")
         slippage = money("0")
@@ -135,32 +275,47 @@ class BacktestEngine:
             if record.rejection_reason:
                 rejected[record.rejection_reason] = rejected.get(record.rejection_reason, 0) + 1
             total_costs += record.transaction_costs
-            slippage += record.slippage
+            slippage += abs(record.slippage)
         starting = capital.state.starting_capital
         ending = capital.state.total_equity
         net_profit = ending - starting
-        max_drawdown = self._max_drawdown(equity_curve)
+        metric_reasons: dict[str, str] = {}
+        profit_factor = None
+        if losses:
+            profit_factor = sum(wins, Decimal("0")) / abs(sum(losses, Decimal("0"))) if wins else Decimal("0")
+        elif wins:
+            metric_reasons["profit_factor"] = "no losing closed trades"
+        else:
+            metric_reasons["profit_factor"] = "no closed trades"
+        sharpe, sortino = self._risk_adjusted_metrics(equity_curve, metric_reasons)
+        expectancy = None if not pnl_values else sum(pnl_values, Decimal("0")) / Decimal(len(pnl_values))
+        if expectancy is None:
+            metric_reasons["expectancy"] = "no closed trades"
         return BacktestReport(
             starting_capital=starting,
             ending_capital=ending,
             net_profit=net_profit,
             return_percentage=money("0") if starting == 0 else net_profit / starting,
-            trades=len(executions),
-            winning_trades=0,
-            losing_trades=0,
-            win_rate=money("0"),
-            average_win=money("0"),
-            average_loss=money("0"),
-            profit_factor=None,
-            maximum_drawdown=max_drawdown,
-            sharpe=None,
-            sortino=None,
+            trades=len(execution_records),
+            winning_trades=len(wins),
+            losing_trades=len(losses),
+            win_rate=money("0") if not pnl_values else Decimal(len(wins)) / Decimal(len(pnl_values)),
+            average_win=money("0") if not wins else sum(wins, Decimal("0")) / Decimal(len(wins)),
+            average_loss=money("0") if not losses else sum(losses, Decimal("0")) / Decimal(len(losses)),
+            profit_factor=profit_factor,
+            expectancy=expectancy,
+            maximum_drawdown=self._max_drawdown(equity_curve),
+            sharpe=sharpe,
+            sortino=sortino,
             transaction_costs=total_costs,
             slippage=slippage,
             user_distributions=capital.state.user_distribution,
             final_ai_capital=capital.state.next_day_capital,
             rejected_trades=sum(rejected.values()),
             rejection_reasons=rejected,
+            metric_unavailable_reasons=metric_reasons,
+            execution_convention=self.execution_convention,
+            liquidity_assumptions_used=self.market_data_adapter.uses_simulated_liquidity,
         )
 
     def _max_drawdown(self, equity_curve: list[Decimal]) -> Decimal:
@@ -171,3 +326,25 @@ class BacktestEngine:
             if peak:
                 max_dd = max(max_dd, (peak - point) / peak)
         return max_dd
+
+    def _risk_adjusted_metrics(self, equity_curve: list[Decimal], reasons: dict[str, str]) -> tuple[Decimal | None, Decimal | None]:
+        if len(equity_curve) < 3:
+            reasons["sharpe"] = "insufficient equity observations"
+            reasons["sortino"] = "insufficient equity observations"
+            return None, None
+        returns = []
+        for previous, current in zip(equity_curve, equity_curve[1:]):
+            if previous:
+                returns.append(float((current - previous) / previous))
+        if len(returns) < 2 or pstdev(returns) == 0:
+            reasons["sharpe"] = "zero or insufficient return variance"
+            sharpe = None
+        else:
+            sharpe = Decimal(str(mean(returns) / pstdev(returns)))
+        downside = [value for value in returns if value < 0]
+        if len(downside) < 2 or pstdev(downside) == 0:
+            reasons["sortino"] = "zero or insufficient downside variance"
+            sortino = None
+        else:
+            sortino = Decimal(str(mean(returns) / pstdev(downside)))
+        return sharpe, sortino

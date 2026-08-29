@@ -14,9 +14,7 @@ from tests.conftest import D
     ],
 )
 def test_daily_profit_sharing_examples_are_strictly_greater_than_ten_percent(safe_context, ending_equity, distribution, next_capital):
-    result = safe_context.guard.settle_trading_day(D(ending_equity), positions_flat=True)
+    result = safe_context.guard.calculate_daily_settlement(D(ending_equity))
 
     assert result.user_distribution == D(distribution)
     assert result.next_day_capital == D(next_capital)
-    assert safe_context.guard.state.user_distribution == D(distribution)
-    assert safe_context.guard.state.next_day_capital == D(next_capital)

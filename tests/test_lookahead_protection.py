@@ -1,4 +1,7 @@
 from iceberg.backtesting.engine import BacktestEngine
+from iceberg.market.calendar import StaticBacktestCalendar
+from iceberg.risk.costs import FixedTransactionCostModel
+from iceberg.risk.slippage import FixedBpsSlippageModel
 from iceberg.domain.models import Candle, TradeProposal
 from iceberg.strategies.base import Strategy
 
@@ -24,6 +27,11 @@ def test_backtest_only_passes_history_available_at_decision_time(settings):
     ]
     strategy = RecordingStrategy()
 
-    BacktestEngine(settings=settings).run({"ABC": candles}, strategy)
+    BacktestEngine(
+        settings=settings,
+        cost_model=FixedTransactionCostModel(),
+        slippage_model=FixedBpsSlippageModel(D("0")),
+        calendar=StaticBacktestCalendar(trading_days={ist_datetime(10, 0).date()}),
+    ).run({"ABC": candles}, strategy)
 
     assert strategy.history_lengths == [1, 2, 3]

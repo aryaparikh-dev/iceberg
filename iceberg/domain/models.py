@@ -138,6 +138,8 @@ class RiskDecision:
     capital_required: Decimal = money("0")
     rejection_reason: str | None = None
     risk_assessment: str = ""
+    authorization: Any | None = None
+    charge_schedule_version: str = "unspecified"
 
     @property
     def approval_status(self) -> ApprovalStatus:
@@ -149,12 +151,19 @@ class Position:
     symbol: str
     quantity: int
     average_price: Decimal
+    cost_basis: Decimal | None = None
 
     def __post_init__(self) -> None:
         self.symbol = self.symbol.upper()
         self.average_price = money(self.average_price)
+        if self.cost_basis is None:
+            self.cost_basis = self.average_price * self.quantity
+        else:
+            self.cost_basis = money(self.cost_basis)
         if self.quantity < 0:
             raise FailClosedError("long-only positions cannot be negative")
+        if self.cost_basis < 0:
+            raise FailClosedError("position cost basis cannot be negative")
 
     def market_value(self, price: Decimal) -> Decimal:
         return money(price) * self.quantity
@@ -176,6 +185,9 @@ class OrderExecution:
     status: str
     rejection_reason: str | None = None
     slippage: Decimal = money("0")
+    gross_pnl: Decimal = money("0")
+    net_pnl: Decimal = money("0")
+    charge_schedule_version: str = "unspecified"
 
     def __post_init__(self) -> None:
         if self.timestamp is not None:
