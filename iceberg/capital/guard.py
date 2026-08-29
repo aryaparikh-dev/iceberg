@@ -56,6 +56,14 @@ class CapitalGuard:
 
     @classmethod
     def initial(cls, starting_capital: Decimal | int | str = Decimal("100"), settings: Settings | None = None, store=None) -> "CapitalGuard":
+        if store is not None:
+            account_exists = False
+            if hasattr(store, "account_state_exists"):
+                account_exists = store.account_state_exists()
+            elif hasattr(store, "load_capital_state"):
+                account_exists = store.load_capital_state() is not None
+            if account_exists:
+                raise ReconciliationError("persisted account state already exists; use CapitalGuard.load(store)")
         starting = money(starting_capital)
         if starting <= 0:
             raise CapitalInvariantError("starting capital must be positive")
@@ -123,6 +131,7 @@ class CapitalGuard:
         self.state.unsettled_cash = money("0")
         self.state.deployed_capital = money("0")
         self.state.market_value = money("0")
+        self.state.realized_pnl = money("0")
         self.state.unrealized_pnl = money("0")
         self.state.total_equity = amount
         self.state.next_day_capital = amount
@@ -266,6 +275,8 @@ class CapitalGuard:
         self.state.unsettled_cash = money("0")
         self.state.deployed_capital = money("0")
         self.state.market_value = money("0")
+        self.state.realized_pnl = money("0")
+        self.state.unrealized_pnl = money("0")
         self.state.total_equity = next_capital
         self._assert_invariants()
         self.persist()

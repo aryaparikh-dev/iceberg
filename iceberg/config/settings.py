@@ -43,6 +43,7 @@ class RiskSettings:
     daily_loss_limit_fraction: Decimal = money("0.20")
     max_consecutive_losses: int = 3
     maximum_positions: int = 10
+    execution_authorization_validity_seconds: int = 30
     min_average_volume: Decimal = money("1000")
     min_average_traded_value: Decimal = money("100000")
     max_bid_ask_spread_fraction: Decimal = money("0.02")
@@ -112,6 +113,8 @@ def validate_settings(settings: Settings) -> Settings:
         raise ConfigurationError("live trading is disabled in V1")
     if settings.testing.trading_mode is TradingMode.FULLY_AUTOMATED_LIVE:
         raise ConfigurationError("fully automated live trading is unavailable in V1")
+    if settings.risk.execution_authorization_validity_seconds <= 0:
+        raise ConfigurationError("execution_authorization_validity_seconds must be positive")
     if settings.safety.withdrawals_allowed:
         raise ConfigurationError("withdrawals are disabled in V1")
     if settings.safety.bank_account_access_allowed:
@@ -158,7 +161,7 @@ def _apply_toml(settings: Settings, data: dict) -> None:
     for key in ("daily_loss_limit_fraction",):
         if key in risk:
             setattr(settings.risk, key, money(risk[key]))
-    for key in ("max_consecutive_losses", "maximum_positions"):
+    for key in ("max_consecutive_losses", "maximum_positions", "execution_authorization_validity_seconds"):
         if key in risk:
             setattr(settings.risk, key, int(risk[key]))
 

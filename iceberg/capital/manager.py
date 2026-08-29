@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from iceberg.capital.funding import FundingLedger
+from iceberg.capital.funding import _FUNDING_LEDGER_TOKEN, FundingLedger
 from iceberg.capital.guard import _CAPITAL_MANAGER_TOKEN, CapitalGuard
 from iceberg.config.settings import Settings
 from iceberg.domain.models import money
@@ -42,7 +42,7 @@ class CapitalManager:
         )
         if created and self.funding_ledger is not None:
             for event in eligible:
-                self.funding_ledger.mark_applied(event.funding_id)
+                self.funding_ledger._mark_applied(event.funding_id, authority_token=_FUNDING_LEDGER_TOKEN)
         return amount
 
     def apply_intraday_confirmations(self, trading_date: date, now: datetime) -> Decimal:
@@ -55,7 +55,7 @@ class CapitalManager:
         self.capital.state.next_day_capital += amount
         if self.funding_ledger is not None:
             for event in eligible:
-                self.funding_ledger.mark_applied(event.funding_id)
+                self.funding_ledger._mark_applied(event.funding_id, authority_token=_FUNDING_LEDGER_TOKEN)
         return self.capital.state.daily_starting_capital
 
     def _eligible_confirmed_events(self, trading_date: date, snapshot_time: datetime):

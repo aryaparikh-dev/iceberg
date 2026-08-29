@@ -2,6 +2,7 @@ import pytest
 
 from iceberg.backtesting.engine import BacktestEngine
 from iceberg.backtesting.market_data import SimulatedLiquidityAssumptionProfile
+from iceberg.domain.enums import TradeSide
 from iceberg.domain.models import Candle, TradeProposal
 from iceberg.exceptions import ConfigurationError, ReconciliationError
 from iceberg.market.calendar import StaticBacktestCalendar
@@ -39,6 +40,7 @@ def candles():
     return [
         Candle("ABC", ist_datetime(10, 0), D("10"), D("10"), D("10"), D("10"), D("1000")),
         Candle("ABC", ist_datetime(10, 1), D("20"), D("20"), D("20"), D("20"), D("1000")),
+        Candle("ABC", ist_datetime(15, 20), D("20"), D("20"), D("20"), D("20"), D("1000")),
     ]
 
 
@@ -46,6 +48,22 @@ def profit_candles():
     return [
         Candle("ABC", ist_datetime(10, 0), D("10"), D("10"), D("10"), D("10"), D("1000")),
         Candle("ABC", ist_datetime(10, 1), D("10"), D("111"), D("10"), D("111"), D("1000")),
+        Candle("ABC", ist_datetime(15, 20), D("111"), D("111"), D("111"), D("111"), D("1000")),
+    ]
+
+
+def no_exit_window_candles():
+    return [
+        Candle("ABC", ist_datetime(10, 0), D("10"), D("10"), D("10"), D("10"), D("1000")),
+        Candle("ABC", ist_datetime(10, 1), D("10"), D("10"), D("10"), D("10"), D("1000")),
+    ]
+
+
+def pre_exit_window_candles():
+    return [
+        Candle("ABC", ist_datetime(10, 0), D("10"), D("10"), D("10"), D("10"), D("1000")),
+        Candle("ABC", ist_datetime(10, 1), D("10"), D("10"), D("10"), D("10"), D("1000")),
+        Candle("ABC", ist_datetime(15, 19), D("10"), D("10"), D("10"), D("10"), D("1000")),
     ]
 
 
@@ -158,3 +176,64 @@ def test_charge_schedule_version_recorded_in_execution(settings, tmp_path):
 
     filled = [execution for execution in store.load_executions() if execution.status == "FILLED"]
     assert filled[0].charge_schedule_version == "unit-cost-schedule"
+
+
+def test_stale_midday_price_cannot_be_used_for_force_exit(settings, tmp_path):
+    from iceberg.capital.guard import CapitalGuard
+    from iceberg.persistence.repositories import SQLiteStateStore
+
+    store = SQLiteStateStore(tmp_path / "stale-exit.sqlite3")
+    with pytest.raises(ReconciliationError):
+        BacktestEngine(
+            settings=settings,
+            cost_model=FixedTransactionCostModel(),
+            slippage_model=FixedBpsSlippageModel(D("0")),
+            calendar=StaticBacktestCalendar(trading_days={ist_datetime(10, 0).date()}),
+            liquidity_assumption_profile=profile(),
+            store=store,
+        ).run({"ABC": no_exit_window_candles()}, BuyFirstBarStrategy())
+
+    executions = store.load_executions()
+    assert [execution.side for execution in executions if execution.status == "FILLED"] == [TradeSide.BUY]
+    assert CapitalGuard.load(store, settings=settings).state.portfolio_state == "UNCERTAIN"
+
+
+def test_force_exit_requires_exit_window_market_data(settings, tmp_path):
+    from iceberg.persistence.repositories import SQLiteStateStore
+
+    store = SQLiteStateStore(tmp_path / "pre-window-exit.sqlite3")
+    with pytest.raises(ReconciliationError, match="force-exit-window"):
+        BacktestEngine(
+            settings=settings,
+            cost_model=FixedTransactionCostModel(),
+            slippage_model=FixedBpsSlippageModel(D("0")),
+            calendar=StaticBacktestCalendar(trading_days={ist_datetime(10, 0).date()}),
+            liquidity_assumption_profile=profile(),
+            store=store,
+        ).run({"ABC": pre_exit_window_candles()}, BuyFirstBarStrategy())
+
+
+def test_missing_exit_price_prevents_daily_settlement(settings, tmp_path):
+    from iceberg.capital.guard import CapitalGuard
+    from iceberg.persistence.repositories import SQLiteStateStore
+
+    store = SQLiteStateStore(tmp_path / "missing-exit-price.sqlite3")
+    with pytest.raises(ReconciliationError):
+        BacktestEngine(
+            settings=settings,
+            cost_model=FixedTransactionCostModel(),
+            slippage_model=FixedBpsSlippageModel(D("0")),
+            calendar=StaticBacktestCalendar(trading_days={ist_datetime(10, 0).date()}),
+            liquidity_assumption_profile=profile(),
+            store=store,
+        ).run(
+            {
+                "ABC": no_exit_window_candles(),
+                "XYZ": [Candle("XYZ", ist_datetime(15, 20), D("50"), D("50"), D("50"), D("50"), D("1000"))],
+            },
+            BuyFirstBarStrategy(),
+        )
+
+    capital = CapitalGuard.load(store, settings=settings)
+    assert capital.state.portfolio_state == "UNCERTAIN"
+    assert capital.state.next_day_capital == settings.capital.initial_capital_inr

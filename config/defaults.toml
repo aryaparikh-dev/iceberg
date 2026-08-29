@@ -20,6 +20,7 @@ intraday_capital_topups_allowed = false
 daily_loss_limit_fraction = "0.20"
 max_consecutive_losses = 3
 maximum_positions = 10
+execution_authorization_validity_seconds = 30
 emergency_stop_enabled = true
 
 [testing]

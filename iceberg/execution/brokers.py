@@ -9,7 +9,7 @@ from uuid import uuid4
 from iceberg.capital.guard import CapitalGuard
 from iceberg.domain.enums import OrderStatus, TradeSide
 from iceberg.domain.models import OrderExecution, TradeProposal, money
-from iceberg.exceptions import CapitalInvariantError, LiveTradingDisabledError
+from iceberg.exceptions import AuthorizationError, CapitalInvariantError, LiveTradingDisabledError
 from iceberg.execution.authorization import ExecutionAuthorization
 from iceberg.portfolio.portfolio import Portfolio
 from iceberg.risk.costs import TransactionCostModel
@@ -81,11 +81,19 @@ class PaperBroker(BrokerInterface):
             self._executions_by_idempotency[idempotency_key] = execution
             self._persist(execution)
             return execution
+        submitted_at = now or authorization.approved_at
+        try:
+            authorization.validate_session(submitted_at)
+        except AuthorizationError as exc:
+            execution = self._rejected(proposal, idempotency_key, str(exc), submitted_at)
+            self._executions_by_idempotency[idempotency_key] = execution
+            self._persist(execution)
+            return execution
 
         snapshot = self._snapshot()
         try:
             with self._transaction():
-                authorization.consume_for(proposal)
+                authorization.consume_for(proposal, submitted_at)
                 self._decision_ids.add(proposal.decision_id)
                 price = self._execution_price(proposal, authorization.quantity)
                 quantity = authorization.quantity
@@ -97,8 +105,7 @@ class PaperBroker(BrokerInterface):
 
                 if proposal.side is TradeSide.BUY:
                     required = gross + costs
-                    if required > self.capital.spendable_cash():
-                        raise CapitalInvariantError("approved buy no longer fits cash")
+                    self._assert_final_buy_invariants(proposal.symbol, gross, required)
                     self.capital.apply_buy(proposal.symbol, quantity, price, costs)
                     self.portfolio.record_buy(proposal.symbol, quantity, price)
                     net_flow = -required
@@ -148,6 +155,24 @@ class PaperBroker(BrokerInterface):
             except Exception:
                 pass
             return execution
+
+    def _assert_final_buy_invariants(self, symbol: str, gross: Decimal, required: Decimal) -> None:
+        current_cost_basis = self.portfolio.gross_cost_basis(symbol)
+        if current_cost_basis + gross > self.capital.max_single_stock_value():
+            raise CapitalInvariantError("final fill breaches stock allocation limit")
+        portfolio_limit = (
+            self.capital.state.daily_starting_capital
+            * self.capital.settings.capital.maximum_portfolio_allocation
+        )
+        if self.capital.state.deployed_capital + gross > portfolio_limit:
+            raise CapitalInvariantError("final fill breaches portfolio allocation limit")
+        if required > self.capital.spendable_cash():
+            raise CapitalInvariantError("final fill exceeds spendable cash")
+        if (
+            not self.capital.settings.capital.leverage_allowed
+            and self.capital.state.available_cash - required < 0
+        ):
+            raise CapitalInvariantError("final fill would create leverage")
 
     def reconcile(self) -> bool:
         if self._state_uncertain:

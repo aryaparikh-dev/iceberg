@@ -8,6 +8,8 @@ Persisted state includes capital state, immutable daily capital snapshots, fundi
 
 On restart, code should restore `CapitalGuard`, `Portfolio`, `FundingLedger`, `EmergencyStop`, and `PaperBroker` from the same `SQLiteStateStore`. The broker reloads decision and idempotency history, so duplicate orders remain blocked after restart.
 
+`CapitalGuard.initial(..., store=...)` is only for an empty account store. If persisted capital, positions, funding, execution history, daily snapshots, idempotency history, emergency-stop state, or distributions already exist, initialization fails closed; restart code must use `CapitalGuard.load(store)`.
+
 If persisted local state and broker state disagree, reconciliation marks the portfolio `UNCERTAIN`, broker cash becomes unknown, and new entries fail closed.
 
 SQLite hardens local paper-trading state, but it is not a substitute for process isolation or broker-side controls in a future live system.

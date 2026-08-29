@@ -1,5 +1,8 @@
+import pytest
+
 from iceberg.capital.guard import CapitalGuard
 from iceberg.domain.models import TradeProposal
+from iceberg.exceptions import ReconciliationError
 from iceberg.execution.brokers import PaperBroker
 from iceberg.persistence.repositories import SQLiteStateStore
 from iceberg.portfolio.portfolio import Portfolio
@@ -89,3 +92,46 @@ def test_reconciliation_mismatch_fails_closed(tmp_path, safe_context):
 
     assert not broker.reconcile()
     assert capital.state.portfolio_state == "UNCERTAIN"
+
+
+def test_initial_refuses_existing_capital_store(tmp_path, safe_context):
+    store = SQLiteStateStore(tmp_path / "existing.sqlite3")
+    CapitalGuard.initial(D("100"), settings=safe_context.settings, store=store)
+
+    with pytest.raises(ReconciliationError, match="CapitalGuard.load"):
+        CapitalGuard.initial(D("500"), settings=safe_context.settings, store=store)
+
+
+def test_restart_cannot_accidentally_reset_capital(tmp_path, safe_context):
+    store = SQLiteStateStore(tmp_path / "reset.sqlite3")
+    capital = CapitalGuard.initial(D("100"), settings=safe_context.settings, store=store)
+    portfolio = Portfolio()
+    broker = PaperBroker(portfolio, capital, safe_context.cost_model, store=store)
+    proposal = TradeProposal.buy("ABC", price=D("10"), decision_id="no-reset")
+    broker.submit_order(proposal, approved(safe_context, proposal, portfolio, capital).authorization, "no-reset", safe_context.now)
+
+    with pytest.raises(ReconciliationError):
+        CapitalGuard.initial(D("999999"), settings=safe_context.settings, store=store)
+
+    restored_capital = CapitalGuard.load(store, safe_context.settings)
+    restored_portfolio = Portfolio.load(store)
+    assert restored_capital.state.available_cash == D("90")
+    assert restored_capital.state.deployed_capital == D("10")
+    assert restored_portfolio.positions["ABC"].quantity == 1
+
+
+def test_restart_preserves_user_distribution(tmp_path, safe_context):
+    store = SQLiteStateStore(tmp_path / "distribution.sqlite3")
+    capital = CapitalGuard.initial(D("100"), settings=safe_context.settings, store=store)
+    portfolio = Portfolio()
+    capital.state.available_cash = D("500")
+    capital.state.settled_cash = D("500")
+    capital.state.broker_available_cash = D("500")
+    capital.settle_trading_day(portfolio)
+
+    with pytest.raises(ReconciliationError):
+        CapitalGuard.initial(D("100"), settings=safe_context.settings, store=store)
+
+    restored = CapitalGuard.load(store, safe_context.settings)
+    assert restored.state.user_distribution == D("200")
+    assert restored.state.next_day_capital == D("300")

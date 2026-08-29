@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 from iceberg.domain.enums import Permission
 from iceberg.exceptions import PermissionDeniedError
-from iceberg.security.auth import Actor, ActorRole, AuthorizationContext
+from iceberg.security.auth import ActorRole, AuthorizationContext, ai_context
 
 
 @dataclass
@@ -15,7 +15,7 @@ class PermissionManager:
 
     @classmethod
     def default_ai(cls) -> "PermissionManager":
-        context = AuthorizationContext(Actor.ai())
+        context = ai_context()
         return cls(
             permissions={
                 Permission.MARKET_DATA_READ,
@@ -28,7 +28,8 @@ class PermissionManager:
 
     @classmethod
     def from_context(cls, context: AuthorizationContext) -> "PermissionManager":
-        return cls(permissions=set(context.actor.permissions), actor=context.actor.role.value, context=context)
+        permissions = set(context.actor.permissions) if context.authenticated else set()
+        return cls(permissions=permissions, actor=context.actor.role.value, context=context)
 
     def has(self, permission: Permission) -> bool:
         return permission in self.permissions

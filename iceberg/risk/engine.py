@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from iceberg.capital.guard import CapitalGuard
@@ -60,6 +60,9 @@ class RiskEngine:
                 estimated_costs=estimated_costs,
                 capital_required=capital_required,
                 approved_at=approved_at,
+                valid_until=approved_at
+                + timedelta(seconds=self.settings.risk.execution_authorization_validity_seconds),
+                trading_date=approved_at.date(),
                 charge_schedule_version=charge_schedule_version,
             )
         return RiskDecision(

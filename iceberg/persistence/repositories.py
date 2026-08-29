@@ -34,6 +34,19 @@ class SQLiteStateStore:
         if self.db.transaction_depth == 0:
             self.db.connection.commit()
 
+    def account_state_exists(self) -> bool:
+        checks = (
+            "SELECT 1 FROM capital_state WHERE id = 1 LIMIT 1",
+            "SELECT 1 FROM daily_snapshots LIMIT 1",
+            "SELECT 1 FROM funding_events LIMIT 1",
+            "SELECT 1 FROM portfolio_positions LIMIT 1",
+            "SELECT 1 FROM executions LIMIT 1",
+            "SELECT 1 FROM decision_ids LIMIT 1",
+            "SELECT 1 FROM idempotency_keys LIMIT 1",
+            "SELECT 1 FROM emergency_stop WHERE id = 1 LIMIT 1",
+        )
+        return any(self.db.connection.execute(query).fetchone() is not None for query in checks)
+
     def save_capital_state(self, state: CapitalState) -> None:
         self.db.connection.execute(
             """

@@ -1,9 +1,8 @@
 from iceberg.domain.enums import Permission
 from iceberg.domain.models import TradeProposal
 from iceberg.exceptions import PermissionDeniedError
-from iceberg.security.auth import admin_context
 
-from tests.conftest import D, market_snapshot
+from tests.conftest import D, authenticated_admin_context, market_snapshot
 
 
 def test_default_ai_permissions_exclude_money_movement_and_live_trading(safe_context):
@@ -41,4 +40,4 @@ def test_ai_cannot_grant_itself_permissions(safe_context):
     import pytest
 
     with pytest.raises(PermissionDeniedError):
-        safe_context.permissions.grant(Permission.LIVE_TRADE, context=admin_context())
+        safe_context.permissions.grant(Permission.LIVE_TRADE, context=authenticated_admin_context())

@@ -15,6 +15,7 @@ from iceberg.risk.costs import FixedTransactionCostModel
 from iceberg.risk.emergency import EmergencyStop
 from iceberg.risk.engine import RiskEngine
 from iceberg.risk.permissions import PermissionManager
+from iceberg.security.auth import _trusted_context_issuer
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -44,6 +45,18 @@ def market_snapshot(symbol: str, price: str | int, now: datetime | None = None, 
     }
     defaults.update(overrides)
     return MarketDataSnapshot(**defaults)
+
+
+def authenticated_user_context(actor_id: str = "test-user"):
+    return _trusted_context_issuer().issue_user(actor_id)
+
+
+def authenticated_admin_context(actor_id: str = "test-admin"):
+    return _trusted_context_issuer().issue_admin(actor_id)
+
+
+def authenticated_reconciler_context(actor_id: str = "test-reconciler"):
+    return _trusted_context_issuer().issue_external_reconciler(actor_id)
 
 
 @pytest.fixture

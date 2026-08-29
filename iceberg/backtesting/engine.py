@@ -115,7 +115,7 @@ class BacktestEngine:
         for now, symbol, candle in timeline:
             if current_day != now.date():
                 if current_day is not None:
-                    self._finish_day(capital, portfolio, broker, engine, risk, exits, latest_prices, current_day, now)
+                    self._finish_day(capital, portfolio, broker, current_day)
                 manager.start_trading_day(now.date(), now.replace(hour=9, minute=0, second=0, microsecond=0))
                 current_day = now.date()
 
@@ -132,26 +132,24 @@ class BacktestEngine:
                 else:
                     audit.log(proposal, risk.reject("HOLD_NO_EXECUTION", proposal), timestamp=now)
 
-            forced = exits.create_force_exit_proposals(portfolio, latest_prices, now)
-            for proposal in forced:
-                result = engine.submit_proposal(
-                    proposal,
-                    risk_engine=risk,
-                    portfolio=portfolio,
-                    capital=capital,
-                    market_data=self.market_data_adapter.snapshot(proposal.symbol, proposal.proposed_price, now),
-                    market_clock=clock,
-                    now=now,
-                    idempotency_key=proposal.decision_id,
+            if clock.is_force_exit_window(now):
+                self._force_exit_on_candle(
+                    symbol,
+                    candle.close,
+                    now,
+                    portfolio,
+                    capital,
+                    engine,
+                    risk,
+                    exits,
+                    clock,
                 )
-                if result.execution is None or result.execution.status == "REJECTED":
-                    capital.mark_portfolio_uncertain()
 
             self._mark_to_market_or_fail_closed(portfolio, capital, latest_prices)
             equity_curve.append(capital.state.total_equity)
 
         if current_day is not None:
-            self._finish_day(capital, portfolio, broker, engine, risk, exits, latest_prices, current_day, timeline[-1][0])
+            self._finish_day(capital, portfolio, broker, current_day)
             equity_curve.append(capital.state.total_equity)
 
         return self._report(capital, audit, equity_curve)
@@ -209,41 +207,46 @@ class BacktestEngine:
         capital: CapitalGuard,
         portfolio: Portfolio,
         broker: PaperBroker,
-        engine: ExecutionEngine,
-        risk: RiskEngine,
-        exits: ExitManager,
-        latest_prices: dict[str, Decimal],
         trading_day: date,
-        now: datetime,
     ) -> None:
         if not broker.reconcile():
             capital.mark_portfolio_uncertain()
             raise ReconciliationError("backtest reconciliation failed")
         if not portfolio.is_flat():
-            force_time = now.replace(
-                year=trading_day.year,
-                month=trading_day.month,
-                day=trading_day.day,
-                hour=15,
-                minute=20,
-                second=0,
-                microsecond=0,
-            )
-            for proposal in exits.create_force_exit_proposals(portfolio, latest_prices, force_time):
-                engine.submit_proposal(
-                    proposal,
-                    risk_engine=risk,
-                    portfolio=portfolio,
-                    capital=capital,
-                    market_data=self.market_data_adapter.snapshot(proposal.symbol, proposal.proposed_price, proposal.timestamp or now),
-                    market_clock=exits.market_clock,
-                    now=proposal.timestamp or now,
-                    idempotency_key=proposal.decision_id,
-                )
+            capital.mark_portfolio_uncertain()
+            raise ReconciliationError(f"missing force-exit-window market data for {trading_day.isoformat()}")
         if not broker.reconcile():
             capital.mark_portfolio_uncertain()
             raise ReconciliationError("backtest reconciliation failed before settlement")
         capital.settle_trading_day(portfolio)
+
+    def _force_exit_on_candle(
+        self,
+        symbol: str,
+        price: Decimal,
+        now: datetime,
+        portfolio: Portfolio,
+        capital: CapitalGuard,
+        engine: ExecutionEngine,
+        risk: RiskEngine,
+        exits: ExitManager,
+        clock: MarketClock,
+    ) -> None:
+        proposals = exits.create_force_exit_proposals(portfolio, {symbol: price}, now)
+        for proposal in proposals:
+            result = engine.submit_proposal(
+                proposal,
+                risk_engine=risk,
+                portfolio=portfolio,
+                capital=capital,
+                market_data=self.market_data_adapter.snapshot(proposal.symbol, proposal.proposed_price, now),
+                market_clock=clock,
+                now=now,
+                idempotency_key=proposal.decision_id,
+            )
+            if result.execution is None or result.execution.status == "REJECTED":
+                capital.mark_portfolio_uncertain()
+                raise ReconciliationError("forced exit failed closed")
 
     def _mark_to_market_or_fail_closed(self, portfolio: Portfolio, capital: CapitalGuard, latest_prices: dict[str, Decimal]) -> None:
         missing = [symbol for symbol in portfolio.positions if symbol not in latest_prices]

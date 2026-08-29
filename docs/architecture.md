@@ -15,9 +15,9 @@ Strategy or AI
   -> PaperBroker
 ```
 
-The strategy layer has no broker reference. Normal trading code submits a proposal, not a caller-supplied approval. `RiskEngine` returns an auditable decision and, only for approved executable orders, a single-use `ExecutionAuthorization` bound to decision ID, symbol, side, quantity, price, estimated costs, required capital, and approval timestamp.
+The strategy layer has no broker reference. Normal trading code submits a proposal, not a caller-supplied approval. `RiskEngine` returns an auditable decision and, only for approved executable orders, a single-use `ExecutionAuthorization` bound to decision ID, symbol, side, quantity, price, estimated costs, required capital, approval timestamp, trading date, and expiry timestamp.
 
-`PaperBroker` rejects missing, fake, mismatched, or reused authorizations. This is architectural hardening, not a Python sandbox: same-process Python can inspect private internals, so any future live broker must add process isolation and broker-side permission controls.
+`PaperBroker` rejects missing, fake, mismatched, expired, cross-session, or reused authorizations. For buys, it revalidates cash, the 10% per-stock gross cost-basis cap, and the total portfolio allocation at the actual slippage-adjusted fill price before committing state. This is architectural hardening, not a Python sandbox: same-process Python can inspect private internals, so any future live broker must add process isolation and broker-side permission controls.
 
 The broker has no bank or withdrawal methods. The live broker is only a disabled stub.
 
@@ -28,7 +28,7 @@ Key modules:
 - `iceberg/risk`: cost model, permissions, emergency stop, risk approvals.
 - `iceberg/execution`: execution gate, paper broker, live disabled stub, forced exits.
 - `iceberg/persistence`: SQLite schema, database transaction wrapper, state repositories.
-- `iceberg/security`: authenticated actors and authorization contexts.
+- `iceberg/security`: authenticated actors, authorization contexts, and the trusted context issuer.
 - `iceberg/market`: market calendar and IST market clock.
 - `iceberg/data`: OHLCV validation.
 - `iceberg/backtesting`: realistic backtest loop using the same risk and capital controls.

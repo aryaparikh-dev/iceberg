@@ -11,6 +11,9 @@ from iceberg.exceptions import FundingError, PermissionDeniedError
 from iceberg.security.auth import AuthorizationContext
 
 
+_FUNDING_LEDGER_TOKEN = object()
+
+
 @dataclass
 class FundingEvent:
     funding_id: str
@@ -48,15 +51,16 @@ class FundingLedger:
         amount: Decimal,
         *,
         currency: str = "INR",
-        created_by: str,
+        context: AuthorizationContext,
         requested_at: datetime,
         notes: str = "",
     ) -> FundingEvent:
+        context.require(Permission.FUNDING_REQUEST)
         event = FundingEvent(
             funding_id=str(uuid4()),
             amount=amount,
             currency=currency,
-            created_by=created_by,
+            created_by=context.actor.actor_id,
             requested_at=requested_at,
             notes=notes,
         )
@@ -105,7 +109,9 @@ class FundingLedger:
         self._persist(event)
         return event
 
-    def mark_applied(self, funding_id: str) -> FundingEvent:
+    def _mark_applied(self, funding_id: str, *, authority_token: object) -> FundingEvent:
+        if authority_token is not _FUNDING_LEDGER_TOKEN:
+            raise PermissionDeniedError("funding can only be applied by the capital manager")
         event = self._require_event(funding_id)
         if event.status is not FundingStatus.CONFIRMED:
             raise FundingError("only confirmed funding can be applied")

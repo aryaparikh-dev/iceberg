@@ -20,6 +20,6 @@ Hard checks include:
 - no leverage and no negative cash
 - daily loss and consecutive closed-trade loss limits
 
-Approved executable decisions include a trusted `ExecutionAuthorization`. Rejections return structured reason codes and are logged by the audit layer.
+Approved executable decisions include a trusted, single-use `ExecutionAuthorization` with a short expiry and same-trading-day binding. Rejections return structured reason codes and are logged by the audit layer.
 
 Consecutive losses count closed losing trades. Losing closes increment the counter, winning closes reset it, and break-even closes leave it unchanged. The counter persists across trading days until a winning closed trade or an authorized administrative risk reset.

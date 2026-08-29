@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
@@ -7,7 +8,7 @@ from iceberg.domain.models import RiskDecision, TradeProposal
 from iceberg.execution.authorization import ExecutionAuthorization
 from iceberg.execution.brokers import PaperBroker
 
-from tests.conftest import D, market_snapshot
+from tests.conftest import D, ist_datetime, market_snapshot
 
 
 def approved_decision(ctx, proposal):
@@ -95,3 +96,28 @@ def test_strategy_cannot_call_broker_directly_without_authorization(safe_context
 
     assert execution.status == "REJECTED"
     assert execution.rejection_reason == "RISK_AUTHORIZATION_REQUIRED"
+
+
+def test_execution_authorization_expires_before_late_submission(safe_context):
+    broker = PaperBroker(safe_context.portfolio, safe_context.guard, safe_context.cost_model)
+    proposal = TradeProposal.buy("ABC", price=D("10"), decision_id="expired-auth")
+    decision = approved_decision(safe_context, proposal)
+    late = safe_context.now + timedelta(seconds=safe_context.settings.risk.execution_authorization_validity_seconds + 1)
+
+    execution = broker.submit_order(proposal, decision.authorization, idempotency_key="expired-auth", now=late)
+
+    assert execution.status == "REJECTED"
+    assert execution.rejection_reason == "AUTHORIZATION_EXPIRED"
+    assert safe_context.portfolio.is_flat()
+
+
+def test_execution_authorization_cannot_cross_trading_session(safe_context):
+    broker = PaperBroker(safe_context.portfolio, safe_context.guard, safe_context.cost_model)
+    proposal = TradeProposal.buy("ABC", price=D("10"), decision_id="next-day-auth")
+    decision = approved_decision(safe_context, proposal)
+
+    execution = broker.submit_order(proposal, decision.authorization, idempotency_key="next-day-auth", now=ist_datetime(10, 0, day=6))
+
+    assert execution.status == "REJECTED"
+    assert execution.rejection_reason == "AUTHORIZATION_SESSION_MISMATCH"
+    assert safe_context.portfolio.is_flat()

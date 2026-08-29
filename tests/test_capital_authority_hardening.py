@@ -2,9 +2,8 @@ import pytest
 
 from iceberg.capital.funding import FundingLedger
 from iceberg.capital.manager import CapitalManager
-from iceberg.security.auth import external_reconciler_context
 
-from tests.conftest import D, TRADING_DATE, ist_datetime
+from tests.conftest import D, TRADING_DATE, authenticated_reconciler_context, authenticated_user_context, ist_datetime
 
 
 def test_capital_snapshot_cannot_be_arbitrarily_increased(safe_context):
@@ -29,10 +28,10 @@ def test_confirmed_funding_applied_only_once(safe_context):
 
     guard = CapitalGuard.initial(D("100"), settings=safe_context.settings)
     ledger = FundingLedger()
-    event = ledger.create_pending(D("50"), created_by="USER", requested_at=ist_datetime(8, 0))
+    event = ledger.create_pending(D("50"), context=authenticated_user_context(), requested_at=ist_datetime(8, 0))
     ledger.confirm(
         event.funding_id,
-        context=external_reconciler_context(),
+        context=authenticated_reconciler_context(),
         external_reference="bank-ref-once",
         confirmed_at=ist_datetime(8, 1),
         effective_trading_date=TRADING_DATE,
