@@ -48,6 +48,7 @@ class RiskSettings:
     min_average_traded_value: Decimal = money("100000")
     max_bid_ask_spread_fraction: Decimal = money("0.02")
     max_estimated_price_impact_fraction: Decimal = money("0.01")
+    max_participation_rate: Decimal = money("0.01")
     emergency_stop_enabled: bool = True
 
 
@@ -158,7 +159,7 @@ def _apply_toml(settings: Settings, data: dict) -> None:
             setattr(settings.capital, key, bool(capital[key]))
 
     risk = data.get("risk", {})
-    for key in ("daily_loss_limit_fraction",):
+    for key in ("daily_loss_limit_fraction", "max_participation_rate"):
         if key in risk:
             setattr(settings.risk, key, money(risk[key]))
     for key in ("max_consecutive_losses", "maximum_positions", "execution_authorization_validity_seconds"):

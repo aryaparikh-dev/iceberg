@@ -46,6 +46,7 @@ class MarketDataSnapshot:
     recent_activity: bool | None = None
     estimated_price_impact_fraction: Decimal | None = None
     abnormal_volatility: bool | None = None
+    observed_volume: Decimal | None = None
 
     def __post_init__(self) -> None:
         require_aware(self.timestamp)
@@ -56,6 +57,7 @@ class MarketDataSnapshot:
             "average_traded_value",
             "bid_ask_spread_fraction",
             "estimated_price_impact_fraction",
+            "observed_volume",
         ):
             value = getattr(self, field_name)
             if value is not None:
