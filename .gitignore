@@ -11,6 +11,12 @@ broker_tokens/
 broker-tokens/
 logs/
 *.log
+data/raw/
+data/normalized/
+data/cache/
+data/experiments/
+research/results/
+research/reports/
 *.db
 *.sqlite
 *.sqlite3
